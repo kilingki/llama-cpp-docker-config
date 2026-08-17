@@ -14,6 +14,9 @@ venv/
 # Benchmark outputs
 benchmarks/results/
 
+# Debug inference outputs (VRAM peaks, request/response dumps)
+output/
+
 # Local notes / scratch
 local/
 

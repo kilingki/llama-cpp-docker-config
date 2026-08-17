@@ -1,23 +1,8 @@
 # Benchmark notes
 
-This directory is a placeholder for later measurements. Do not expect a full harness in the initial runtime.
+`./scripts/benchmark.sh` runs a single `llama-bench` pass inside the already-running container. It is not a full harness.
 
-## Planned comparison axes
-
-- Quantization
-- Context length: `32K`, `64K`, `128K`, `192K`, `262K`
-- KV cache type (`CACHE_TYPE_K` / `CACHE_TYPE_V`)
-- Flash Attention
-- batch size
-- ubatch size
-
-## Metrics to record
-
-- VRAM usage
-- Prompt processing tok/s
-- Generation tok/s
-- TTFT
-- maximum stable context
+Recorded sweeps (quant, context length, KV cache, Flash Attention, batch/ubatch) and saved metrics live on the [root README Roadmap](../README.md#roadmap).
 
 ## How to run a single llama-bench pass
 
@@ -33,4 +18,4 @@ Optional overrides:
 FLASH_ATTN=on CACHE_TYPE_K=q8_0 CACHE_TYPE_V=q8_0 N_PROMPT=2048 ./scripts/benchmark.sh
 ```
 
-Write outputs under `benchmarks/results/` (gitignored).
+Output goes to stdout. `benchmarks/results/` is gitignored for later saved runs; the wrapper does not write files there yet.

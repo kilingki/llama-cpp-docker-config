@@ -80,6 +80,7 @@ class ProcessManager:
         await self._terminate_process()
 
         try:
+            self._validate_model_files()
             await self._start_process()
             await self._wait_until_ready()
         except Exception as exc:
@@ -138,6 +139,14 @@ class ProcessManager:
             logger.exception("Failed to stop llama-server during shutdown")
         async with self._lock:
             self.state = ModelState.UNLOADED
+
+    def _validate_model_files(self) -> None:
+        model_path = self.settings.model_path
+        if not model_path or not os.path.isfile(model_path):
+            raise FileNotFoundError(f"MODEL_PATH does not exist: {model_path}")
+        mmproj_path = self.settings.mmproj_path
+        if mmproj_path and not os.path.isfile(mmproj_path):
+            raise FileNotFoundError(f"MMPROJ_PATH does not exist: {mmproj_path}")
 
     async def _start_process(self) -> None:
         cmd = self.settings.llama_server_cmd()
