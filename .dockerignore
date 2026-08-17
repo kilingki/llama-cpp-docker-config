@@ -1,0 +1,10 @@
+.git
+.github
+local
+*.gguf
+/models
+benchmarks/results
+.env
+__pycache__
+*.pyc
+.cursor
