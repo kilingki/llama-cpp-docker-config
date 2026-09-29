@@ -26,8 +26,6 @@ N_PROMPT="${N_PROMPT:-512}"
 N_GEN="${N_GEN:-128}"
 OUTPUT_FORMAT="${OUTPUT_FORMAT:-md}"
 
-mkdir -p "${ROOT}/benchmarks/results"
-
 exec docker compose exec -T "${SERVICE}" llama-bench \
   --model "${MODEL_PATH_CONTAINER}" \
   --n-gpu-layers "${N_GPU_LAYERS}" \

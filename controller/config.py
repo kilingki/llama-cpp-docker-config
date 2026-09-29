@@ -20,8 +20,6 @@ def _truthy(value: str) -> bool | None:
 
 @dataclass(frozen=True)
 class Settings:
-    controller_host: str
-    controller_port: int
     llama_server_bin: str
     load_timeout_sec: float
     unload_timeout_sec: float
@@ -45,8 +43,6 @@ class Settings:
     @classmethod
     def from_env(cls) -> "Settings":
         return cls(
-            controller_host=_env("CONTROLLER_HOST", "0.0.0.0"),
-            controller_port=int(_env("CONTROLLER_PORT", "8000")),
             llama_server_bin=_env("LLAMA_SERVER_BIN", "/usr/local/bin/llama-server"),
             load_timeout_sec=float(_env("LOAD_TIMEOUT_SEC", "300")),
             unload_timeout_sec=float(_env("UNLOAD_TIMEOUT_SEC", "30")),

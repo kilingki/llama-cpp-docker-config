@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Make the llama.cpp control endpoint reachable.
+# A new container starts unloaded and does not load the model.
+# An existing container is left as it is, including ready or in-flight work.
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")" && pwd)"
+cd "${root}"
+
+port="${PUBLIC_PORT:-}"
+if [[ -z "${port}" && -f .env ]]; then
+  port="$(awk -F= '/^PUBLIC_PORT=/{print $2}' .env | tail -n 1 | tr -d '[:space:]\r"'"'"'')"
+fi
+port="${port:-8000}"
+
+status_url="http://127.0.0.1:${port}/control/status"
+
+fetch_status() {
+  python3 - "${status_url}" <<'PY'
+import json
+import sys
+import urllib.request
+
+url = sys.argv[1]
+with urllib.request.urlopen(url, timeout=3) as response:
+    payload = json.loads(response.read().decode("utf-8"))
+print(json.dumps(payload))
+PY
+}
+
+existing="$(docker compose ps -aq llama-runtime || true)"
+if [[ -z "${existing}" ]]; then
+  docker compose up -d
+  for _ in $(seq 1 60); do
+    if payload="$(fetch_status 2>/dev/null)"; then
+      python3 - "${payload}" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+ok = (
+    payload.get("state") == "unloaded"
+    and payload.get("residency") == "not_resident"
+    and payload.get("active_requests") == 0
+)
+raise SystemExit(0 if ok else 1)
+PY
+      exit 0
+    fi
+    sleep 1
+  done
+  echo "new runtime did not report unloaded/not_resident" >&2
+  exit 1
+fi
+
+if fetch_status >/dev/null; then
+  exit 0
+fi
+
+echo "llama-runtime container exists but GET /control/status failed; not restarting" >&2
+exit 1

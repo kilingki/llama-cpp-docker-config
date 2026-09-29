@@ -1,28 +1,25 @@
 # llama.cpp CUDA Docker Runtime
 
-Generic Docker runtime for GGUF LLM/VLM inference with llama.cpp CUDA. The image contains the runtime only. Model weights stay on the host.
+Single-container Docker runtime for GGUF LLM and VLM inference with [llama.cpp](https://github.com/ggml-org/llama.cpp) CUDA. The image contains the runtime only. Model weights stay on the host.
 
-Set `HOST_MODELS_DIR` to the host directory that contains GGUF files. Compose mounts that directory read-only at `/models` in the container. Profile `MODEL_PATH` and optional `MMPROJ_PATH` are container paths under `/models`.
+One published base URL is one logical model. The container starts unloaded. `POST /control/load` starts `llama-server`, and OpenAI-compatible `/v1/*` requests are proxied to it. InferSwap uses the same control API as the other runtimes in this set: empty load and unload bodies, and `GET /control/status` as the readiness source.
 
-## Project purpose
+This repository is [MIT](LICENSE). llama.cpp is [MIT](https://github.com/ggml-org/llama.cpp/blob/master/LICENSE). GGUF weights are licensed separately and are not part of this repository.
 
-- llama.cpp CUDA backend for GGUF models
-- OpenAI-compatible inference API
-- InferSwap-oriented load/unload lifecycle API
-- Runtime image and GGUF files are separate
+## Contents
 
-vLLM, TensorRT-LLM, and Triton are out of scope. This repository owns the llama.cpp runtime only.
-
-## Requirements
-
-- NVIDIA GPU
-- NVIDIA Driver
-- Docker
-- NVIDIA Container Toolkit
-
-The image is built from CUDA 12.8.1 (Ubuntu 24.04) and llama.cpp **b10453**. Default `CUDA_ARCH=86` (sm_86, e.g. RTX 3090). Other GPUs need a rebuild with a matching `CUDA_ARCH`.
-
-Verified on Windows 11 + WSL2 Ubuntu 24.04 with RTX 3090 24GB.
+- [Architecture](#architecture)
+- [Project structure](#project-structure)
+- [Requirements](#requirements)
+- [Quick start](#quick-start)
+- [Model control](#model-control)
+- [API examples](#api-examples)
+- [Configuration](#configuration)
+- [Multimodal](#multimodal)
+- [Limitations](#limitations)
+- [Tests](#tests)
+- [Benchmarks](#benchmarks)
+- [License](#license)
 
 ## Architecture
 
@@ -44,7 +41,7 @@ controller (FastAPI / uvicorn on :8000)
                  (child process group, not published)
 ```
 
-Compose sets `init: true`, so Docker init is PID 1 and uvicorn is the service process. The controller always binds `0.0.0.0:8000` inside the container (`Dockerfile` `CMD`). `PUBLIC_PORT` only changes the host publish port.
+Compose sets `init: true`, so Docker init is PID 1 and uvicorn is the service process. The controller binds `0.0.0.0:8000` inside the container (`Dockerfile` `CMD`). `PUBLIC_PORT` only changes the host publish port.
 
 ```text
 container lifecycle  !=  model lifecycle
@@ -53,40 +50,126 @@ model load    = llama-server process start
 model unload  = llama-server process termination
 ```
 
-The container stays up while unloaded. InferSwap does not need llama.cpp internals; it uses the controller contract only.
+The container stays up while unloaded. Model state moves `unloaded` → `loading` → `ready` → `unloading` → `unloaded`. Load or unload failure sets `failed`, together with `residency` `resident`, `not_resident`, or `unknown`. An unexpected llama-server exit sets `failed`. `/health` only reports that the controller process is up. Model readiness is `GET /control/status`.
 
-Model state: `UNLOADED` → `LOADING` → `READY` → `UNLOADING` → `UNLOADED`. Unexpected llama-server exit sets `ERROR`. `/health` `llama_server` is `stopped` | `loading` | `ok` | `stopping` | `error`.
+## Project structure
 
-## InferSwap integration
+- `docker-compose.yml`: one `llama-runtime` service
+- `prepare-inferswap`: start the container when none exists, or leave an existing container unchanged
+- `.env.example`: host port, model directory, and profile name
+- `configs/common.env`: llama-server bind, fit mode, and load/unload timeouts
+- `configs/models/<name>.env`: one GGUF profile; the default example is `qwen3.8-27b`
+- `controller/`: FastAPI control API and `/v1` proxy
+- `tests/test_control.py`: control state machine, no GPU
+- `tests/smoke_api.py`: health, load, chat, stream, unload against a running container
+- `tests/infer_qwen.py`: reasoning-effort and image checks
+- `tests/check_gpu_lifecycle.py`: repeated load, chat, and unload with host GPU memory
+- `tests/benchmark.sh`: one `llama-bench` pass
+
+## Requirements
+
+- NVIDIA GPU
+- NVIDIA driver
+- Docker and Docker Compose
+- NVIDIA Container Toolkit
+
+The image is built from CUDA 12.8.1 (Ubuntu 24.04) and llama.cpp **b10453**. The default `CUDA_ARCH` is `86` (sm_86, for example an RTX 3090). Other GPUs need a rebuild with a matching `CUDA_ARCH`.
+
+Verified on Windows 11 + WSL2 Ubuntu 24.04 with an RTX 3090 24GB.
+
+## Quick start
+
+1. Copy the example environment file and set the host directory that contains the GGUF files.
+
+```bash
+cp .env.example .env
+```
+
+```env
+PUBLIC_PORT=8000
+HOST_MODELS_DIR=/path/to/gguf
+MODEL_PROFILE=qwen3.8-27b
+```
+
+`HOST_MODELS_DIR` is a host path. Compose mounts it read-only at `/models`. Profile `MODEL_PATH` and optional `MMPROJ_PATH` are container paths under `/models`. The default profile expects both the Qwen3.8-27B GGUF and its mmproj in that directory.
+
+2. Build and start the container. A new container does not load the model.
+
+```bash
+docker compose build
+docker compose up -d
+```
+
+`./prepare-inferswap` does the same start when no container exists. If a container already exists and `GET /control/status` succeeds, the script exits 0 and does not restart or unload it. If the container exists but status fails, it exits non-zero and does not recreate it.
+
+3. Confirm the unloaded state, load the profile, call chat, then unload.
+
+```bash
+curl -s http://localhost:8000/control/status
+curl -s -X POST http://localhost:8000/control/load \
+  -H "Content-Type: application/json" \
+  -d '{}'
+curl -s http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen3.8-27b",
+    "messages": [{"role": "user", "content": "Hello"}],
+    "max_tokens": 64,
+    "chat_template_kwargs": {"enable_thinking": false}
+  }'
+curl -s -X POST http://localhost:8000/control/unload
+```
+
+Add another GGUF by creating `configs/models/<name>.env` and setting `MODEL_PROFILE=<name>` in `.env`. A rebuild is not required when only the GGUF file changes. `POST /control/load` does not take a model name.
+
+## Model control
 
 InferSwap talks to this runtime through:
 
 ```text
+GET  /control/status
 POST /control/load
 POST /control/unload
-GET  /control/status
-GET  /health
 /v1/*
 ```
 
-## Usage
+`GET /health` is the container healthcheck. InferSwap does not use it. The healthcheck passes while the model is unloaded.
 
-```text
-cp .env.example .env
-# set HOST_MODELS_DIR to the host directory that contains GGUF files
-# default profile qwen3.8-27b expects both the GGUF and its mmproj under that directory
-docker compose build
-docker compose up -d
-curl -X POST http://localhost:8000/control/load
-curl http://localhost:8000/v1/chat/completions ...
-curl -X POST http://localhost:8000/control/unload
+Control requests take an empty body or `{}`. Any other JSON object is HTTP 400 `BAD_REQUEST`.
+
+`GET /control/status` returns:
+
+```json
+{
+  "state": "unloaded",
+  "residency": "not_resident",
+  "active_requests": 0,
+  "last_error": null
+}
 ```
 
-Add another GGUF by creating `configs/models/<name>.env` and setting `MODEL_PROFILE=<name>` in `.env`. Rebuild is not required when only the GGUF file changes. Switching models at runtime via the load body is not implemented; see [Roadmap](#roadmap).
+`state` is `unloaded`, `loading`, `ready`, `unloading`, or `failed`. `residency` is `resident`, `not_resident`, or `unknown`. `active_requests` counts accepted inference requests. `GET /v1/models` is not counted. Other `/v1/*` requests count as one until llama-server finishes them, including when the client disconnects first. `last_error` is `null` after a successful load or unload, or `{"code","message"}` after a lifecycle failure.
 
-## API example
+`POST /control/load` returns 200 with `state=ready` and `residency=resident` when the server can accept inference. Calling it again while ready does not start a second llama-server. `POST /control/unload` returns 200 with `state=unloaded`, `residency=not_resident`, and `active_requests=0`. Calling it again in that state is a no-op. Unload returns 409 `BUSY` while `active_requests` is greater than 0. A load during unload, or an unload during load, returns 409 `LIFECYCLE_CONFLICT`.
 
-Examples below use the default profile `qwen3.8-27b`.
+Control errors use this body:
+
+```json
+{
+  "error": {
+    "code": "BUSY",
+    "message": "runtime has active inference requests"
+  }
+}
+```
+
+`code` is `BAD_REQUEST`, `BUSY`, `LIFECYCLE_CONFLICT`, `LOAD_FAILED`, `UNLOAD_FAILED`, or `STATUS_FAILED`.
+
+If `/v1/*` is called while `state` is not `ready`, the controller returns 503 `{"detail":"model is not ready"}` and does not call llama-server.
+
+A missing model file is HTTP 500 `LOAD_FAILED`. `state` becomes `failed`, `residency` is `not_resident`, and llama-server is not started. Load can be retried.
+
+## API examples
 
 Health while unloaded:
 
@@ -97,47 +180,11 @@ curl -s http://localhost:8000/health
 ```json
 {
   "controller": "ok",
-  "model_state": "UNLOADED",
   "llama_server": "stopped"
 }
 ```
 
-Load the configured profile. `model` is optional; if set, it must match `MODEL_NAME` or the controller returns `400`.
-
-```bash
-curl -s -X POST http://localhost:8000/control/load \
-  -H "Content-Type: application/json" \
-  -d '{"model":"qwen3.8-27b"}'
-```
-
-```json
-{
-  "status": "loaded",
-  "state": "READY",
-  "model": "qwen3.8-27b",
-  "pid": 123
-}
-```
-
-A second load while already `READY` returns `200` with `"status": "already_loaded"`. Load or unload while `LOADING` / `UNLOADING` returns `409`.
-
-Status:
-
-```bash
-curl -s http://localhost:8000/control/status
-```
-
-```json
-{
-  "state": "READY",
-  "model": "qwen3.8-27b",
-  "pid": 123,
-  "backend": "llama.cpp",
-  "runtime_port": 8080
-}
-```
-
-Chat completion. Default Qwen3.8 thinking can leave `message.content` empty; smoke and the examples below turn it off.
+Chat. Default Qwen3.8 thinking can leave `message.content` empty. The examples below turn it off.
 
 ```bash
 curl -s http://localhost:8000/v1/chat/completions \
@@ -164,69 +211,7 @@ curl -N http://localhost:8000/v1/chat/completions \
   }'
 ```
 
-Unload:
-
-```bash
-curl -s -X POST http://localhost:8000/control/unload
-```
-
-```json
-{
-  "status": "unloaded",
-  "state": "UNLOADED"
-}
-```
-
-Already unloaded returns `200` with `"status": "already_unloaded"`.
-
-If `/v1/*` is called while the model is not `READY`, the controller returns `503` with `{"detail":"Model is not loaded"}` instead of leaking an internal connection error.
-
-## Multimodal
-
-Qwen3.8-27B is one model identity. `mmproj` is the llama.cpp projector that turns vision on for that same server process. There is no `qwen3.8-27b-vl` profile.
-
-```text
-Qwen3.8-27B
-├── Text
-├── Image (with mmproj)
-└── Video (unsupported in this image; send frames as image_url)
-```
-
-```text
-MMPROJ_PATH=
-→ text-only llama-server (no --mmproj)
-
-MMPROJ_PATH=/models/xxx-mmproj.gguf
-→ same llama-server with multimodal enabled
-```
-
-The default profile sets `MMPROJ_PATH` because this model is natively multimodal. Leave it empty on other profiles for text-only. `POST /control/load` does not accept an mmproj field; on/off is env/profile only.
-
-Example host layout under `${HOST_MODELS_DIR}` (filenames are examples; change env if yours differ):
-
-```text
-/models/
-├── Qwen3.8-27B-Q4_K_M.gguf
-└── Qwen3.8-27B-mmproj-F16.gguf
-```
-
-`mmproj` must match the model architecture and checkpoint. It is not a generic file shared across unrelated GGUFs.
-
-Path checks run at `/control/load`, not controller startup, so an unloaded container can still start. Failures are HTTP `500` and llama-server is not started:
-
-- missing `MODEL_PATH` file → `{"detail":"Model load failed: MODEL_PATH does not exist: ..."}`
-- non-empty missing `MMPROJ_PATH` → `{"detail":"Model load failed: MMPROJ_PATH does not exist: ..."}`
-- empty `MMPROJ_PATH` → text-only, no mmproj check
-
-To confirm a missing mmproj fails load, start the container with `MMPROJ_PATH=/models/does-not-exist.gguf` and `POST /control/load`. Do not put the path on the load request body.
-
-### Text inference
-
-Same as the chat example above. Text still works when mmproj is loaded.
-
-### Image inference
-
-The controller proxies `/v1/*` without parsing the body. llama.cpp b10453 accepts OpenAI-style `image_url` on `/v1/chat/completions`: `data:image/...;base64,...`, raw base64, or a remote `http(s)://` URL (llama-server fetches it; this runtime does not download or resize images). Multiple images are extra content parts. Local `file://` is not exposed (`--media-path` is not configured).
+Image. The controller proxies `/v1/*` without parsing the body. llama.cpp b10453 accepts OpenAI-style `image_url` on `/v1/chat/completions`: `data:image/...;base64,...`, raw base64, or a remote `http(s)://` URL. llama-server fetches remote URLs. This runtime does not download or resize images. Multiple images are extra content parts. Local `file://` is not exposed.
 
 ```bash
 python3 - <<'PY'
@@ -256,19 +241,6 @@ print(urllib.request.urlopen(req).read().decode())
 PY
 ```
 
-### Video
-
-llama.cpp b10453 can accept `input_video` on `/v1/chat/completions` (`data` or `url`), but decoding needs `ffmpeg` on the llama-server PATH. This image does not install ffmpeg, and this runtime does not sample frames or transcode video. Treat native video as unsupported here; see [Roadmap](#roadmap).
-
-Send sampled frames as multiple `image_url` parts from the caller instead. CLI `--video` belongs to `llama-mtmd-cli`, not this HTTP runtime.
-
-### Limitations
-
-- Audio input is out of scope.
-- Remote image URLs are fetched by llama-server, not the controller. The container needs outbound network access.
-- Image tokens use extra context and VRAM. This runtime uses `LLAMA_FIT=off`, so llama-server will not silently shrink ctx/batch. If you OOM, lower `CONTEXT_SIZE` / `BATCH_SIZE` in the profile or use a smaller mmproj quant.
-- After unload, check leftover projector CUDA memory with `nvidia-smi` if needed. That check is not part of smoke.
-
 ## Configuration
 
 Model values are not hardcoded in Python or the Dockerfile.
@@ -279,9 +251,7 @@ configs/common.env
 configs/models/<name>.env    # default example: qwen3.8-27b.env
 ```
 
-`HOST_MODELS_DIR` is a host path. `MODEL_PATH` / `MMPROJ_PATH` are container paths under `/models`.
-
-The default example profile is `qwen3.8-27b` (Qwen3.8-27B GGUF Q4_K_M plus matching mmproj). Default `CONTEXT_SIZE` is `32768`; do not treat 262K as the first-run setting.
+The default example profile is `qwen3.8-27b` (Qwen3.8-27B GGUF Q4_K_M plus a matching mmproj). Default `CONTEXT_SIZE` is `32768`.
 
 Profile knobs map to llama-server flags. The controller also always passes `--no-ui`.
 
@@ -304,30 +274,79 @@ Profile knobs map to llama-server flags. The controller also always passes `--no
 | `JINJA` | `--jinja` / `--no-jinja` |
 | `LLAMA_FIT` | `--fit` (default `off`) |
 
-Controller timeouts (not llama-server flags): `LOAD_TIMEOUT_SEC` waits for llama-server `/health` after spawn (default `300`); `UNLOAD_TIMEOUT_SEC` waits after SIGTERM before SIGKILL (default `30`).
+`LOAD_TIMEOUT_SEC` waits for llama-server `/health` after spawn (default `300`). `UNLOAD_TIMEOUT_SEC` waits after SIGTERM before SIGKILL (default `30`). Those two are controller timeouts, not llama-server flags.
+
+Example host layout under `${HOST_MODELS_DIR}` (filenames are examples; change the env file if yours differ):
+
+```text
+/models/
+├── Qwen3.8-27B-Q4_K_M.gguf
+└── Qwen3.8-27B-mmproj-F16.gguf
+```
+
+`mmproj` must match the model architecture and checkpoint. `POST /control/load` does not accept an mmproj field. On or off is the profile only. An empty `MMPROJ_PATH` starts a text-only server.
+
+## Multimodal
+
+Qwen3.8-27B is one model identity. `mmproj` is the llama.cpp projector that turns vision on for that same server process. There is no separate vision profile.
+
+```text
+MMPROJ_PATH=
+→ text-only llama-server (no --mmproj)
+
+MMPROJ_PATH=/models/xxx-mmproj.gguf
+→ same llama-server with multimodal enabled
+```
+
+Text chat still works when mmproj is loaded. The default profile sets `MMPROJ_PATH` because this model is natively multimodal. Leave it empty on other profiles for text-only.
+
+Path checks run at `/control/load`, not at controller startup, so an unloaded container can still start.
+
+- missing `MODEL_PATH` file → `LOAD_FAILED`, `MODEL_PATH does not exist: ...`
+- non-empty missing `MMPROJ_PATH` → `LOAD_FAILED`, `MMPROJ_PATH does not exist: ...`
+- empty `MMPROJ_PATH` → text-only, no mmproj check
+
+## Limitations
+
+- Audio input is out of scope.
+- Native video is unsupported. llama.cpp b10453 can accept `input_video`, but decoding needs `ffmpeg`, and this image does not install it. This runtime does not sample frames or transcode video. Send sampled frames as multiple `image_url` parts. CLI `--video` belongs to `llama-mtmd-cli`, not this HTTP runtime.
+- Remote image URLs are fetched by llama-server, not the controller. The container needs outbound network access.
+- Image tokens use extra context and VRAM. `LLAMA_FIT=off`, so llama-server does not shrink ctx or batch. On OOM, lower `CONTEXT_SIZE` or `BATCH_SIZE` in the profile, or use a smaller mmproj quant.
+- A recorded benchmark sweep (context length, quant, KV cache, TTFT) is not implemented. `./tests/benchmark.sh` is one `llama-bench` pass to stdout.
+- FastAPI also serves `/docs`, `/redoc`, and `/openapi.json`. The API has no authentication. Keep the published port on a private interface.
+- vLLM, TensorRT-LLM, and Triton are out of scope.
 
 ## Tests
 
+Contract tests need `controller/requirements.txt` installed and do not need a GPU:
+
 ```bash
-./scripts/smoke_test.sh
-IMAGE_FILE=/path/to/photo.jpg ./scripts/smoke_vision.sh
+python3 -m unittest tests.test_control
 ```
 
-- `smoke_test.sh`: health (unloaded) → `/v1/models` expects `503` → load → chat → stream → unload → reload. Chat steps send `enable_thinking: false` and require `pong` in `content`. The last step is reload, so a passing run leaves the model loaded.
-- `smoke_vision.sh`: load → text-with-mmproj. `IMAGE_FILE` is optional; when set, an image chat step runs. Without it, the script still passes after the text step.
-- Each run writes `output/<timestamp>-smoke-*/INDEX.md` (request/response per step, optional VRAM peaks when `nvidia-smi` is available). `RECORD_VRAM=0` skips VRAM polling. The default text smoke does not require an image fixture or GPU tools.
-- `scripts/record_case.sh` is the internal recorder those scripts call. It always encodes local images as `data:image/jpeg;base64,...`.
+The next commands need a running container.
+
+```bash
+python3 tests/smoke_api.py
+python3 tests/infer_qwen.py
+python3 tests/check_gpu_lifecycle.py
+```
+
+- `tests/smoke_api.py`: health while unloaded, `/v1/models` expects 503, load, chat, stream, unload, reload. Chat steps send `enable_thinking: false` and require `pong` in `content`. The last step is reload, so a passing run leaves the model loaded.
+- `tests/infer_qwen.py`: reasoning-effort text cases, then image description. It requires `local/test-cat-512.jpg` and `local/test-cat.jpg`, and exits if either file is missing. A passing run leaves the model loaded.
+- `tests/smoke_api.py` and `tests/infer_qwen.py` write `tests/outputs/<timestamp>-*/INDEX.md`.
+- `tests/check_gpu_lifecycle.py` repeats load, chat, and unload and records host GPU memory in `tests/outputs/gpu_lifecycle.md`. It does not invent an unmeasured byte budget.
 
 ## Benchmarks
 
-See [benchmarks/README.md](benchmarks/README.md). `./scripts/benchmark.sh` is a thin `llama-bench` wrapper (one pass, stdout). Unload the model first if you need the full GPU VRAM. A recorded sweep is not implemented; see [Roadmap](#roadmap).
+See [benchmarks/README.md](benchmarks/README.md).
 
-## Roadmap
+```bash
+./tests/benchmark.sh
+```
 
-Not implemented. Checkboxes are intended work, not current behavior.
+Unload the model first if you need the full GPU VRAM. The wrapper prints one `llama-bench` pass to stdout.
 
-- [ ] Runtime model switching (`POST /control/load` `model` must match the configured profile today)
-- [ ] Recorded benchmark harness (VRAM, prompt tok/s, generation tok/s, TTFT, maximum stable context)
-- [ ] Context-length sweep: 32K, 64K, 128K, 192K, 262K
-- [ ] MTP / speculative decoding
-- [ ] Native video in this image (`input_video` + ffmpeg)
+## License
+
+[MIT](LICENSE)
