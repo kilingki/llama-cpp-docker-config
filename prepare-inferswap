@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Make the llama.cpp control endpoint reachable.
-# A new container starts unloaded and does not load the model.
-# An existing container is left as it is, including ready or in-flight work.
+# A new or stopped container starts unloaded and does not load the model.
+# A running container is left as it is, including ready or in-flight work.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")" && pwd)"
@@ -28,12 +28,20 @@ print(json.dumps(payload))
 PY
 }
 
-existing="$(docker compose ps -aq llama-runtime || true)"
-if [[ -z "${existing}" ]]; then
-  docker compose up -d
-  for _ in $(seq 1 60); do
-    if payload="$(fetch_status 2>/dev/null)"; then
-      python3 - "${payload}" <<'PY'
+running="$(docker compose ps -q llama-runtime || true)"
+if [[ -n "${running}" ]]; then
+  if fetch_status >/dev/null; then
+    exit 0
+  fi
+  echo "llama-runtime container is running but GET /control/status failed; not restarting" >&2
+  exit 1
+fi
+
+docker compose up -d --no-build --no-recreate
+
+for _ in $(seq 1 60); do
+  if payload="$(fetch_status 2>/dev/null)"; then
+    python3 - "${payload}" <<'PY'
 import json
 import sys
 
@@ -45,17 +53,10 @@ ok = (
 )
 raise SystemExit(0 if ok else 1)
 PY
-      exit 0
-    fi
-    sleep 1
-  done
-  echo "new runtime did not report unloaded/not_resident" >&2
-  exit 1
-fi
+    exit 0
+  fi
+  sleep 1
+done
 
-if fetch_status >/dev/null; then
-  exit 0
-fi
-
-echo "llama-runtime container exists but GET /control/status failed; not restarting" >&2
+echo "new runtime did not report unloaded/not_resident" >&2
 exit 1

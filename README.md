@@ -55,7 +55,7 @@ The container stays up while unloaded. Model state moves `unloaded` → `loading
 ## Project structure
 
 - `docker-compose.yml`: one `llama-runtime` service
-- `prepare-inferswap`: start the container when none exists, or leave an existing container unchanged
+- `prepare-inferswap`: start the container when it is down, or leave a running container unchanged
 - `.env.example`: host port, model directory, and profile name
 - `configs/common.env`: llama-server bind, fit mode, and load/unload timeouts
 - `configs/models/<name>.env`: one GGUF profile; the default example is `qwen3.8-27b`
@@ -100,7 +100,7 @@ docker compose build
 docker compose up -d
 ```
 
-`./prepare-inferswap` does the same start when no container exists. If a container already exists and `GET /control/status` succeeds, the script exits 0 and does not restart or unload it. If the container exists but status fails, it exits non-zero and does not recreate it.
+`./prepare-inferswap` runs `docker compose up -d --no-build --no-recreate` when the container is missing or stopped. It does not build an image and does not load the model. A newly started process must report `unloaded` / `not_resident` with no active requests. If the container is already running and `GET /control/status` succeeds, the script exits 0 and does not restart or unload it. If that check fails, it exits non-zero and does not recreate the container.
 
 3. Confirm the unloaded state, load the profile, call chat, then unload.
 
