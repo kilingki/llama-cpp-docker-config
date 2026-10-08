@@ -33,8 +33,8 @@ LLM_CASES = (
 )
 
 IMAGE_CASES = (
-    ("vlm-cat-512", ROOT / "local" / "test-cat-512.jpg"),
-    ("vlm-cat", ROOT / "local" / "test-cat.jpg"),
+    ("vlm-cat-512", ROOT / "tests" / "test-cat-512.jpg"),
+    ("vlm-cat", ROOT / "tests" / "test-cat.jpg"),
 )
 
 

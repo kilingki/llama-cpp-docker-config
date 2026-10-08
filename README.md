@@ -333,7 +333,7 @@ python3 tests/check_gpu_lifecycle.py
 ```
 
 - `tests/smoke_api.py`: health while unloaded, `/v1/models` expects 503, load, chat, stream, unload, reload. Chat steps send `enable_thinking: false` and require `pong` in `content`. The last step is reload, so a passing run leaves the model loaded.
-- `tests/infer_qwen.py`: reasoning-effort text cases, then image description. It requires `local/test-cat-512.jpg` and `local/test-cat.jpg`, and exits if either file is missing. A passing run leaves the model loaded.
+- `tests/infer_qwen.py`: reasoning-effort text cases, then image description. It requires `tests/test-cat-512.jpg` and `tests/test-cat.jpg`, and exits if either file is missing. A passing run leaves the model loaded.
 - `tests/smoke_api.py` and `tests/infer_qwen.py` write `tests/outputs/<timestamp>-*/INDEX.md`.
 - `tests/check_gpu_lifecycle.py` repeats load, chat, and unload and records host GPU memory in `tests/outputs/gpu_lifecycle.md`. It does not invent an unmeasured byte budget.
 
